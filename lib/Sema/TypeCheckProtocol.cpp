@@ -19,6 +19,7 @@
 #include "MiscDiagnostics.h"
 #include "TypeChecker.h"
 #include "swift/Basic/SourceManager.h"
+#include "swift/Basic/StringExtras.h"
 #include "swift/AST/ArchetypeBuilder.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/Decl.h"
@@ -1707,9 +1708,18 @@ diagnoseMatch(TypeChecker &tc, Module *module,
                 withAssocTypes);
     break;
 
-  case MatchKind::RenamedMatch:
-    tc.diagnose(match.Witness, diag::protocol_witness_renamed, withAssocTypes);
+  case MatchKind::RenamedMatch: {
+    auto diag = tc.diagnose(match.Witness, diag::protocol_witness_renamed,
+                            req->getFullName(), withAssocTypes);
+
+    // Fix the name.
+    fixDeclarationName(diag, match.Witness, req->getFullName());
+
+    // Also fix the Objective-C name, if needed.
+    if (req->isObjC())
+      fixDeclarationObjCName(diag, match.Witness, req->getObjCRuntimeName());
     break;
+  }
 
   case MatchKind::KindConflict:
     tc.diagnose(match.Witness, diag::protocol_witness_kind_conflict,
@@ -4109,23 +4119,39 @@ void TypeChecker::checkConformance(NormalProtocolConformance *conformance) {
 
 /// Determine the score when trying to match two identifiers together.
 static unsigned scoreIdentifiers(Identifier lhs, Identifier rhs,
-                                 unsigned limit, bool isFirstParamOfFunc) {
+                                 unsigned limit) {
   // Simple case: we have the same identifier.
   if (lhs == rhs) return 0;
 
-  // One of the identifiers is empty.
-  if (lhs.empty() != rhs.empty()) {
-    // Attribute a score of "1" when the first argument of a function is
-    // present in one case but absent in the other, because this was a change
-    // from Swift 2 to Swift 3.
-    if (isFirstParamOfFunc) return 1;
-
-    // Otherwise, use the length of the non-empty identifier.
+  // One of the identifiers is empty. Use the length of the non-empty
+  // identifier.
+  if (lhs.empty() != rhs.empty())
     return lhs.empty() ? rhs.str().size() : lhs.str().size();
-  }
 
   // Compute the edit distance between the two names.
   return lhs.str().edit_distance(rhs.str(), true, limit);
+}
+
+/// Combine the given base name and first argument label into a single
+/// name.
+static StringRef
+combineBaseNameAndFirstArgument(Identifier baseName,
+                                Identifier firstArgName,
+                                SmallVectorImpl<char> &scratch) {
+  // Handle cases where one or the other name is empty.
+  if (baseName.empty()) {
+    if (firstArgName.empty()) return "";
+    return firstArgName.str();
+  }
+
+  if (firstArgName.empty())
+    return baseName.str();
+
+  // Append the first argument name to the base name.
+  scratch.clear();
+  scratch.append(baseName.str().begin(), baseName.str().end());
+  camel_case::appendSentenceCase(scratch, firstArgName.str());
+  return StringRef(scratch.data(), scratch.size());
 }
 
 /// Compute the scope between two potentially-matching names, which is
@@ -4138,21 +4164,65 @@ static unsigned scorePotentiallyMatchingNames(DeclName lhs, DeclName rhs,
   if (lhs.getArgumentNames().size() != rhs.getArgumentNames().size())
     return limit;
 
-  // Score the base name match.
-  unsigned score = scoreIdentifiers(lhs.getBaseName(), rhs.getBaseName(),
-                                    limit, false);
+  // Score the base name match. If there is a first argument for a
+  // function, include its text along with the base name's text.
+  unsigned score;
+  if (lhs.getArgumentNames().empty() || !isFunc) {
+    score = scoreIdentifiers(lhs.getBaseName(), rhs.getBaseName(), limit);
+  } else {
+    llvm::SmallString<16> lhsScratch;
+    StringRef lhsFirstName =
+      combineBaseNameAndFirstArgument(lhs.getBaseName(),
+                                      lhs.getArgumentNames()[0],
+                                      lhsScratch);
+
+    llvm::SmallString<16> rhsScratch;
+    StringRef rhsFirstName =
+      combineBaseNameAndFirstArgument(rhs.getBaseName(),
+                                      rhs.getArgumentNames()[0],
+                                      rhsScratch);
+
+    score = lhsFirstName.edit_distance(rhsFirstName.str(), true, limit);
+  }
   if (score >= limit) return limit;
 
   // Compute the edit distance between matching argument names.
-  for (unsigned i = 0; i != lhs.getArgumentNames().size(); ++i) {
+  for (unsigned i = isFunc ? 1 : 0; i < lhs.getArgumentNames().size(); ++i) {
     score += scoreIdentifiers(lhs.getArgumentNames()[i],
                               rhs.getArgumentNames()[i],
-                              limit - score,
-                              isFunc && i == 0);
+                              limit - score);
     if (score >= limit) return limit;
   }
 
   return score;
+}
+
+/// Apply omit-needless-words to the given declaration, if possible.
+static Optional<DeclName> omitNeedlessWords(ValueDecl *value) {
+  if (auto func = dyn_cast<AbstractFunctionDecl>(value))
+    return swift::omitNeedlessWords(func);
+  if (auto var = dyn_cast<VarDecl>(value)) {
+    if (auto newName = swift::omitNeedlessWords(var))
+      return DeclName(*newName);
+    return None;
+  }
+  return None;
+}
+
+/// Determine the score between two potentially-matching declarations.
+static unsigned scorePotentiallyMatching(ValueDecl *req, ValueDecl *witness,
+                                         unsigned limit) {
+  DeclName reqName = req->getFullName();
+  DeclName witnessName = witness->getFullName();
+
+  // Apply the omit-needless-words heuristics to both names.
+  if (auto adjustedReqName = ::omitNeedlessWords(req))
+    reqName = *adjustedReqName;
+  if (auto adjustedWitnessName = ::omitNeedlessWords(witness))
+    witnessName = *adjustedWitnessName;
+
+  return scorePotentiallyMatchingNames(reqName, witnessName, isa<FuncDecl>(req),
+                                       limit);
 }
 
 namespace {
@@ -4270,21 +4340,22 @@ static bool shouldWarnAboutPotentialWitness(ValueDecl *req,
       if (!attr->isImplicit()) return false;
   }
 
-  // If the score is relatively high, don't warn: this is probably unrelated.
-  // The heuristic we use here is to ignore outright omissions and determine
-  // whether there was more than one typo for every two characters. If so,
-  // consider it "different".
+  // If the score is relatively high, don't warn: this is probably
+  // unrelated.  Allow about one typo for every two properly-typed
+  // characters, which prevents completely-wacky suggestions in many
+  // cases.
   unsigned reqNameLen = getNameLength(req->getFullName());
   unsigned witnessNameLen = getNameLength(witness->getFullName());
-  unsigned lengthDiff =
-    std::max(reqNameLen, witnessNameLen) - std::min(reqNameLen, witnessNameLen);
-  if ((score - lengthDiff) > (witnessNameLen + 1) / 3) return false;
+  if (score > (std::min(reqNameLen, witnessNameLen) + 1) / 3)
+    return false;
 
   return true;
 }
 
 /// Diagnose a potential witness.
-static void diagnosePotentialWitness(TypeChecker &tc, ValueDecl *req,
+static void diagnosePotentialWitness(TypeChecker &tc,
+                                     NormalProtocolConformance *conformance,
+                                     ValueDecl *req,
                                      ValueDecl *witness,
                                      Accessibility accessibility) {
   auto proto = cast<ProtocolDecl>(req->getDeclContext());
@@ -4296,20 +4367,18 @@ static void diagnosePotentialWitness(TypeChecker &tc, ValueDecl *req,
               req->getFullName(),
               proto->getFullName());
 
-  if (req->getFullName() != witness->getFullName()) {
-    // Note to fix the names.
-    auto diag = tc.diagnose(witness, diag::optional_req_near_match_rename,
-                            req->getFullName());
-    fixDeclarationName(diag, witness, req->getFullName());
-
-    // Also fix the Objective-C name, if needed.
-    if (req->isObjC())
-      fixDeclarationObjCName(diag, witness, req->getObjCRuntimeName());
-  } else if (req->isObjC() && !witness->isObjC()) {
-    // Note to add @objc.
+  // Describe why the witness didn't satisfy the requirement.
+  auto match = matchWitness(tc, conformance->getProtocol(), conformance,
+                            conformance->getDeclContext(), req, witness);
+  if (match.Kind == MatchKind::ExactMatch &&
+      req->isObjC() && !witness->isObjC()) {
+    // Special case: note to add @objc.
     auto diag = tc.diagnose(witness,
                             diag::optional_req_nonobjc_near_match_add_objc);
-    fixDeclarationObjCName(diag, witness, req->getObjCRuntimeName());    
+    fixDeclarationObjCName(diag, witness, req->getObjCRuntimeName());
+  } else {
+    diagnoseMatch(tc, conformance->getDeclContext()->getParentModule(),
+                  conformance, req, match);
   }
 
   // If moving the declaration can help, suggest that.
@@ -4335,6 +4404,20 @@ static void diagnosePotentialWitness(TypeChecker &tc, ValueDecl *req,
   }
 
   tc.diagnose(req, diag::protocol_requirement_here, req->getFullName());
+}
+
+/// Determine whether the given requirement was left unsatisfied.
+static bool isUnsatisfiedReq(NormalProtocolConformance *conformance,
+                             ValueDecl *req) {
+  if (conformance->isInvalid()) return false;
+  if (isa<TypeDecl>(req)) return false;
+
+  // An optional requirement might not have a witness...
+  if (!conformance->hasWitness(req) ||
+      !conformance->getWitness(req, nullptr).getDecl())
+    return req->getAttrs().hasAttribute<OptionalAttr>();
+
+  return false;
 }
 
 void TypeChecker::checkConformancesInContext(DeclContext *dc,
@@ -4364,27 +4447,34 @@ void TypeChecker::checkConformancesInContext(DeclContext *dc,
   auto conformances = dc->getLocalConformances(ConformanceLookupKind::All,
                                                &diagnostics,
                                                /*sorted=*/true);
-  bool hasAnyUnsatisfiedOptionalReqs = false;
+  // Catalog all of members of this declaration context that satisfy
+  // requirements of conformances in this context.
+  SmallVector<ValueDecl *, 16> unsatisfiedReqs;
+
+  bool anyInvalid = false;
   for (auto conformance : conformances) {
     // Check and record normal conformances.
     if (auto normal = dyn_cast<NormalProtocolConformance>(conformance)) {
       checkConformance(normal);
 
-      // Check whether there are any unsatisfied optional requirements.
-      if (!normal->isInvalid() && !hasAnyUnsatisfiedOptionalReqs) {
-        auto proto = conformance->getProtocol();
-        for (auto member : proto->getMembers()) {
-          if (isa<TypeDecl>(member)) continue;
+      if (anyInvalid) continue;
 
-          auto value = dyn_cast<ValueDecl>(member);
-          if (!value) continue;
+      if (normal->isInvalid()) {
+        anyInvalid = true;
+        continue;
+      }
 
-          // If there is an empty witness, record it.
-          if (normal->hasWitness(value) &&
-              !normal->getWitness(value, nullptr).getDecl()) {
-            hasAnyUnsatisfiedOptionalReqs = true;
-            break;
-          }
+      // Check whether there are any unsatisfied requirements.
+      auto proto = conformance->getProtocol();
+      for (auto member : proto->getMembers()) {
+        auto req = dyn_cast<ValueDecl>(member);
+        if (!req) continue;
+
+        // If the requirement is unsatisfied, we might want to warn
+        // about near misses; record it.
+        if (isUnsatisfiedReq(normal, req)) {
+          unsatisfiedReqs.push_back(req);
+          continue;
         }
       }
     }
@@ -4413,55 +4503,41 @@ void TypeChecker::checkConformancesInContext(DeclContext *dc,
              diag.ExistingExplicitProtocol->getName());
   }
 
-  // If there were any unsatisfied optional requirements, check whether
-  // there are any near-matches we should diagnose.
-  if (hasAnyUnsatisfiedOptionalReqs) {
-    // Catalog all of members of this declaration context that satisfy
-    // requirements of conformances in this context.
-    llvm::MapVector<DeclName, llvm::TinyPtrVector<ValueDecl *>>
-      unsatisfiedOptionalReqs;
+  // If there were any unsatisfied requirements, check whether there
+  // are any near-matches we should diagnose.
+  if (!unsatisfiedReqs.empty() && !anyInvalid) {
+    // Collect the set of witnesses that came from this context.
     llvm::SmallPtrSet<ValueDecl *, 16> knownWitnesses;
     for (auto conformance : conformances) {
       conformance->forEachValueWitness(
         nullptr,
         [&](ValueDecl *req, ConcreteDeclRef witness) {
           // If there is a witness, record it if it's within this context.
-          if (witness.getDecl()) {
-            if (witness.getDecl()->getDeclContext() == dc)
-              knownWitnesses.insert(witness.getDecl());
-            return;
-          }
-
-          // There is no witness. If this was an optional requirement,
-          // record it as such.
-          if (req->getAttrs().hasAttribute<OptionalAttr>())
-            unsatisfiedOptionalReqs[req->getBaseName()].push_back(req);
+          if (witness.getDecl() && witness.getDecl()->getDeclContext() == dc)
+            knownWitnesses.insert(witness.getDecl());
          });
     }
 
-    // Find all of the members that aren't used to satisfy requirements,
-    // and check whether they are close to an unsatisfied requirement.
+    // Find all of the members that aren't used to satisfy
+    // requirements, and check whether they are close to an
+    // unsatisfied or defaulted requirement.
     for (auto member : idc->getMembers()) {
-      // Filter out anything that couldn't satisfy an optional requirement.
+      // Filter out anything that couldn't satisfy one of the
+      // requirements or was used to satisfy a different requirement.
       auto value = dyn_cast<ValueDecl>(member);
       if (!value) continue;
       if (isa<TypeDecl>(value)) continue;
       if (knownWitnesses.count(value) > 0) continue;
       if (!value->getFullName()) continue;
 
-      // Consider any optional requirements with the same base name.
-      auto optionalReqs = unsatisfiedOptionalReqs.find(value->getBaseName());
-      if (optionalReqs == unsatisfiedOptionalReqs.end()) continue;
-
-      // Find the optional requirements with the nearest-matching names.
+      // Find the unsatisfied requirements with the nearest-matching
+      // names.
       SmallVector<ValueDecl *, 4> bestOptionalReqs;
       unsigned bestScore = UINT_MAX;
-      for (auto req : optionalReqs->second) {
+      for (auto req : unsatisfiedReqs) {
         // Score this particular optional requirement.
-        auto score = scorePotentiallyMatchingNames(value->getFullName(),
-                                                   req->getFullName(),
-                                                   isa<FuncDecl>(req),
-                                                   bestScore);
+        auto score = scorePotentiallyMatching(req, value, bestScore);
+
         // If the score is better than the best we've seen, update the best
         // and clear out the list.
         if (score < bestScore) {
@@ -4492,40 +4568,46 @@ void TypeChecker::checkConformancesInContext(DeclContext *dc,
       // If we have something to complain about, do so.
       if (!bestOptionalReqs.empty()) {
         auto req = bestOptionalReqs[0];
-        diagnosePotentialWitness(*this, req, value, defaultAccessibility);
+        bool diagnosed = false;
+        for (auto conformance : conformances) {
+          if (conformance->getProtocol() == req->getDeclContext()) {
+            diagnosePotentialWitness(*this,
+                                     conformance->getRootNormalConformance(),
+                                     req, value, defaultAccessibility);
+            diagnosed = true;
+            break;
+          }
+        }
+        assert(diagnosed && "Failed to find conformance to diagnose?");
+        (void)diagnosed;
 
         // Remove this optional requirement from the list. We don't want to
         // complain about it twice.
-        if (optionalReqs->second.size() == 1) {
-          unsatisfiedOptionalReqs.erase(optionalReqs);
-        } else {
-          optionalReqs->second.erase(std::find(optionalReqs->second.begin(),
-                                               optionalReqs->second.end(),
-                                               req));
-        }
+        unsatisfiedReqs.erase(std::find(unsatisfiedReqs.begin(),
+                                        unsatisfiedReqs.end(),
+                                        req));
       }
     }
 
-    // For any unsatified optional @objc requirements that remain,
-    // note them in the AST for @objc selector collision checking.
-    for (const auto &unsatisfied : unsatisfiedOptionalReqs) {
-      for (auto req : unsatisfied.second) {
-        // Skip non-@objc requirements.
-        if (!req->isObjC()) continue;
+    // For any unsatified optional @objc requirements that remain
+    // unsatisfied, note them in the AST for @objc selector collision
+    // checking.
+    for (auto req : unsatisfiedReqs) {
+      // Skip non-@objc requirements.
+      if (!req->isObjC()) continue;
 
-        // Skip unavailable requirements.
-        if (req->getAttrs().isUnavailable(Context)) continue;
+      // Skip unavailable requirements.
+      if (req->getAttrs().isUnavailable(Context)) continue;
 
-        // Record this requirement.
-        if (auto funcReq = dyn_cast<AbstractFunctionDecl>(req)) {
-          Context.recordObjCUnsatisfiedOptReq(dc, funcReq);
-        } else {
-          auto storageReq = cast<AbstractStorageDecl>(req);
-          if (auto getter = storageReq->getGetter())
-            Context.recordObjCUnsatisfiedOptReq(dc, getter);
-          if (auto setter = storageReq->getSetter())
-            Context.recordObjCUnsatisfiedOptReq(dc, setter);
-        }
+      // Record this requirement.
+      if (auto funcReq = dyn_cast<AbstractFunctionDecl>(req)) {
+        Context.recordObjCUnsatisfiedOptReq(dc, funcReq);
+      } else {
+        auto storageReq = cast<AbstractStorageDecl>(req);
+        if (auto getter = storageReq->getGetter())
+          Context.recordObjCUnsatisfiedOptReq(dc, getter);
+        if (auto setter = storageReq->getSetter())
+          Context.recordObjCUnsatisfiedOptReq(dc, setter);
       }
     }
   }
