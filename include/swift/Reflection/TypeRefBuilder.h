@@ -86,6 +86,9 @@ struct ReflectionInfo {
 /// Note that the TypeRefBuilder owns the memory for all TypeRefs
 /// it vends.
 class TypeRefBuilder {
+#define TYPEREF(Id, Parent) friend class Id##TypeRef;
+#include "swift/Reflection/TypeRefs.def"
+
 public:
   using BuiltType = const TypeRef *;
   using BuiltNominalTypeDecl = Optional<std::string>;
@@ -96,13 +99,21 @@ public:
   TypeRefBuilder &operator=(const TypeRefBuilder &other) = delete;
 
 private:
+  /// Makes sure dynamically allocated TypeRefs stick around for the life of
+  /// this TypeRefBuilder and are automatically released.
   std::vector<std::unique_ptr<const TypeRef>> TypeRefPool;
+
   TypeConverter TC;
+
+#define TYPEREF(Id, Parent) \
+  std::unordered_map<TypeRefID, const Id##TypeRef *, \
+                     TypeRefID::Hash, TypeRefID::Equal> Id##TypeRefs;
+#include "swift/Reflection/TypeRefs.def"
 
 public:
   template <typename TypeRefTy, typename... Args>
-  TypeRefTy *makeTypeRef(Args... args) {
-    auto TR = new TypeRefTy(::std::forward<Args>(args)...);
+  const TypeRefTy *makeTypeRef(Args... args) {
+    const auto TR = new TypeRefTy(::std::forward<Args>(args)...);
     TypeRefPool.push_back(std::unique_ptr<const TypeRef>(TR));
     return TR;
   }
@@ -115,7 +126,8 @@ public:
     return BuiltinTypeRef::create(*this, mangledName);
   }
 
-  Optional<std::string> createNominalTypeDecl(const Demangle::NodePointer &node) {
+  Optional<std::string>
+  createNominalTypeDecl(const Demangle::NodePointer &node) {
     return Demangle::mangleNode(node);
   }
 
@@ -139,6 +151,8 @@ public:
   const TupleTypeRef *
   createTupleType(const std::vector<const TypeRef *> &elements,
                   std::string &&labels, bool isVariadic) {
+    // FIXME: Add uniqueness checks in TupleTypeRef::Profile and
+    // unittests/Reflection/TypeRef.cpp if using labels for identity.
     return TupleTypeRef::create(*this, elements, isVariadic);
   }
 
@@ -148,6 +162,7 @@ public:
                      const TypeRef *result,
                      FunctionTypeFlags flags) {
     // FIXME: don't ignore inOutArgs
+    // and add test to unittests/Reflection/TypeRef.cpp
     return FunctionTypeRef::create(*this, args, result, flags);
   }
 
@@ -171,8 +186,9 @@ public:
     return ExistentialMetatypeTypeRef::create(*this, instance);
   }
 
-  const MetatypeTypeRef *createMetatypeType(const TypeRef *instance) {
-    return MetatypeTypeRef::create(*this, instance);
+  const MetatypeTypeRef *createMetatypeType(const TypeRef *instance,
+                                            bool WasAbstract = false) {
+    return MetatypeTypeRef::create(*this, instance, WasAbstract);
   }
 
   const GenericTypeParameterTypeRef *
@@ -202,16 +218,23 @@ public:
     return WeakStorageTypeRef::create(*this, base);
   }
 
+  const ObjCClassTypeRef *
+  createObjCClassType(const std::string &mangledName) {
+    return ObjCClassTypeRef::create(*this, mangledName);
+  }
+
   const ObjCClassTypeRef *getUnnamedObjCClassType() {
-    return ObjCClassTypeRef::getUnnamed();
+    return createObjCClassType("");
   }
 
-  const ForeignClassTypeRef *createForeignClassType(std::string &&mangledName) {
-    return ForeignClassTypeRef::getUnnamed(); // FIXME
+  const ForeignClassTypeRef *
+  createForeignClassType(const std::string &mangledName) {
+    return ForeignClassTypeRef::create(*this, mangledName);
   }
 
-  const ForeignClassTypeRef *getUnnamedForeignClassType() {
-    return ForeignClassTypeRef::getUnnamed();
+  const ForeignClassTypeRef *
+  getUnnamedForeignClassType() {
+    return createForeignClassType("");
   }
 
   const OpaqueTypeRef *getOpaqueType() {
