@@ -1559,7 +1559,8 @@ public:
   /// marked as unavailable, either through "unavailable" or "obsoleted:".
   bool diagnoseExplicitUnavailability(const ValueDecl *D,
                                       SourceRange R,
-                                      const DeclContext *DC);
+                                      const DeclContext *DC,
+                                      const CallExpr *CE);
 
   /// @}
 
@@ -1743,6 +1744,11 @@ public:
   /// Returns true if the reference or any of its parents is an
   /// unavailable (or obsoleted) declaration.
   bool isInsideUnavailableDeclaration(SourceRange ReferenceRange,
+                                      const DeclContext *DC);
+
+  /// Returns true if the reference is lexically contained in a declaration
+  /// that is deprecated on all deployment targets.
+  bool isInsideDeprecatedDeclaration(SourceRange ReferenceRange,
                                      const DeclContext *DC);
 
   /// Returns the availability attribute indicating deprecation if the
@@ -1755,7 +1761,8 @@ public:
   void diagnoseDeprecated(SourceRange SourceRange,
                           const DeclContext *ReferenceDC,
                           const AvailableAttr *Attr,
-                          DeclName Name);
+                          DeclName Name,
+                          const CallExpr *CE);
   /// @}
 
   /// If LangOptions::DebugForbidTypecheckPrefix is set and the given decl
