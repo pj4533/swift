@@ -44,7 +44,9 @@ class ReflectionContext
 
 public:
   using super::getBuilder;
+  using super::readIsaMask;
   using super::readTypeFromMetadata;
+  using super::readMetadataFromInstance;
   using typename super::StoredPointer;
 
   explicit ReflectionContext(std::shared_ptr<MemoryReader> reader)
@@ -65,13 +67,9 @@ public:
     getBuilder().addReflectionInfo(I);
   }
 
-  std::pair<bool, StoredPointer> readerIsaMask() {
-    return getReader().readIsaMask();
-  }
-
-  /// Return a description of the layout of a heap object having the given
+  /// Return a description of the layout of a class instance with the given
   /// metadata as its isa pointer.
-  const TypeInfo *getInstanceTypeInfo(StoredPointer MetadataAddress) {
+  const TypeInfo *getMetadataTypeInfo(StoredPointer MetadataAddress) {
     // See if we cached the layout already
     auto found = Cache.find(MetadataAddress);
     if (found != Cache.end())
@@ -98,7 +96,7 @@ public:
 
           // Perform layout
           if (valid)
-            TI = TC.getInstanceTypeInfo(TR, size, align);
+            TI = TC.getClassInstanceTypeInfo(TR, size, align);
         }
         break;
       }
@@ -110,6 +108,15 @@ public:
     // Cache the result for future lookups
     Cache[MetadataAddress] = TI;
     return TI;
+  }
+
+  /// Return a description of the layout of a class instance with the given
+  /// metadata as its isa pointer.
+  const TypeInfo *getInstanceTypeInfo(StoredPointer ObjectAddress) {
+    auto MetadataAddress = readMetadataFromInstance(ObjectAddress);
+    if (!MetadataAddress.first)
+      return nullptr;
+    return getMetadataTypeInfo(MetadataAddress.second);
   }
 
   /// Return a description of the layout of a value with the given type.
