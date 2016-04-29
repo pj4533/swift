@@ -26,7 +26,6 @@ enum class SymbolKind {
 
   Module,
   ClangModule, // FIXME: collapse into Module and use a separate Language field.
-  SourceFile,
 
   Enum,
   Struct,
@@ -39,14 +38,10 @@ enum class SymbolKind {
   GenericTypeParam,
 
   Function,
+  Variable,
   PrefixOperator,
   PostfixOperator,
   InfixOperator,
-
-  LocalVariable,
-  GlobalVariable,
-  ParamVariable,
-
   Accessor,
   Subscript,
   EnumElement,
@@ -69,7 +64,6 @@ enum class SymbolSubKind {
   AccessorSetter,
   AccessorWillSet,
   AccessorDidSet,
-  AccessorMaterializeForSet,
   AccessorAddressor,
   AccessorMutableAddressor,
 

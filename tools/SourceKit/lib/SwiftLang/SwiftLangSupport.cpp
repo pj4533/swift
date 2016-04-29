@@ -550,13 +550,8 @@ UIdent SwiftLangSupport::getUIDForSymbol(SymbolKind kind, SymbolSubKind subKind,
     return UID_FOR(FunctionPostfixOperator);
   case SymbolKind::InfixOperator:
     return UID_FOR(FunctionInfixOperator);
-  case SymbolKind::LocalVariable:
-    return UID_FOR(VarLocal);
-  case SymbolKind::GlobalVariable:
+  case SymbolKind::Variable:
     return UID_FOR(VarGlobal);
-  case SymbolKind::ParamVariable:
-    // There is no KindRefVarParam. It's not usually an interesting difference.
-    return isRef ? KindRefVarLocal : KindDeclVarParam;
   case SymbolKind::InstanceMethod:
     return UID_FOR(MethodInstance);
   case SymbolKind::ClassMethod:
@@ -583,8 +578,6 @@ UIdent SwiftLangSupport::getUIDForSymbol(SymbolKind kind, SymbolSubKind subKind,
       return UID_FOR(AccessorWillSet);
     case SymbolSubKind::AccessorDidSet:
       return UID_FOR(AccessorDidSet);
-    case SymbolSubKind::AccessorMaterializeForSet:
-      llvm_unreachable("unexpected MaterializeForSet");
     case SymbolSubKind::AccessorAddressor:
       return UID_FOR(AccessorAddress);
     case SymbolSubKind::AccessorMutableAddressor:
