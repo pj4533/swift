@@ -689,7 +689,8 @@ public:
                                         /*isConstant*/ true,
                                         llvm::GlobalValue::PrivateLinkage,
                                         init,
-                                        "capture_descriptor");
+                                        "\x01l__swift3_capture_descriptor");
+    var->setSection(IGM.getCaptureDescriptorMetadataSectionName());
     var->setAlignment(IGM.getPointerAlignment().getValue());
 
     auto replacer = llvm::ConstantExpr::getBitCast(var, IGM.Int8PtrTy);
@@ -707,7 +708,7 @@ static std::string getReflectionSectionName(IRGenModule &IGM,
     case llvm::Triple::MachO:
       assert(Base.size() <= 7
              && "Mach-O section name length must be <= 16 characters");
-      OS << "__DATA, __swift3_" << Base << ", regular, no_dead_strip";
+      OS << "__TEXT, __swift3_" << Base << ", regular, no_dead_strip";
       break;
     case llvm::Triple::ELF:
       OS << ".swift3_" << Base;
@@ -729,6 +730,10 @@ std::string IRGenModule::getBuiltinTypeMetadataSectionName() {
 
 std::string IRGenModule::getAssociatedTypeMetadataSectionName() {
   return getReflectionSectionName(*this, "assocty");
+}
+
+std::string IRGenModule::getCaptureDescriptorMetadataSectionName() {
+  return getReflectionSectionName(*this, "capture");
 }
 
 std::string IRGenModule::getReflectionStringsSectionName() {
