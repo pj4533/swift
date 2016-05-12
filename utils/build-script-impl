@@ -536,10 +536,9 @@ function set_build_options_for_host() {
                 -DCMAKE_OSX_SYSROOT:PATH="$(xcrun --sdk ${xcrun_sdk_name} --show-sdk-path)"
                 -DLLVM_ENABLE_LIBCXX:BOOL=TRUE
                 -DLLVM_TOOL_COMPILER_RT_BUILD:BOOL="$(false_true ${SKIP_COMPILER_RT})"
-                -DCOMPILER_RT_ENABLE_IOS:BOOL=FALSE
+                -DCOMPILER_RT_ENABLE_IOS:BOOL="$(false_true ${SKIP_IOS})"
                 -DCOMPILER_RT_ENABLE_WATCHOS:BOOL=FALSE
                 -DCOMPILER_RT_ENABLE_TVOS:BOOL=FALSE
-                -DSANITIZER_MIN_OSX_VERSION="${cmake_osx_deployment_target}"
             )
             if [[ $(true_false "${LLVM_ENABLE_LTO}") = "TRUE" ]]; then
                 if [[ $(cmake_needs_to_specify_standard_computed_defaults) = "TRUE" ]]; then
