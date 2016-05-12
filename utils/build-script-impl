@@ -186,10 +186,13 @@ KNOWN_SETTINGS=(
     install-xctest              ""               "whether to install xctest"
     install-foundation          ""               "whether to install foundation"
     install-libdispatch         ""               "whether to install libdispatch"
+    skip-install-host           ""               "set to skip installing any products built for the host (when cross-compiling)"
     darwin-install-extract-symbols ""            "whether to extract symbols with dsymutil during installations"
     host-target                 ""               "The host target. LLVM, Clang, and Swift will be built for this target. The built LLVM and Clang will be used to compile Swift for the cross-compilation targets. **This argument is required**"
     stdlib-deployment-targets   ""               "space-separated list of targets to compile or cross-compile the Swift standard library for"
     cross-compile-hosts         ""               "space-separated list of targets to cross-compile host Swift tools for"
+    cross-compile-toolchain-bin ""               "Path to the cross-compile toolchain bin directory"
+    cross-compile-sysroot       ""               "Cross compile sysroot path"
     skip-merge-lipo-cross-compile-tools ""       "set to skip running merge-lipo after installing cross-compiled host Swift tools"
     darwin-deployment-version-osx     "10.9"     "minimum deployment target version for OS X"
     darwin-deployment-version-ios     "7.0"      "minimum deployment target version for iOS"
@@ -1009,7 +1012,7 @@ for t in ${CROSS_COMPILE_HOSTS} ; do
         iphonesimulator-i386 | iphonesimulator-x86_64 | \
         iphoneos-arm64 | iphoneos-armv7 | iphoneos-armv7s | \
         appletvos-arm64 | appletvsimulator-x86_64 | \
-        watchos-armv7k | watchsimulator-i386 )
+        watchos-armv7k | watchsimulator-i386 | linux-armv7 )
             ;;
         *)
             echo "Unknown deployment target: ${t}"
@@ -1443,6 +1446,33 @@ if [[ "${BUILD_NINJA}" ]] ; then
     )
 fi
 
+function get_pkg_config_path() {
+    eval ARG=$1
+    FIND_RESULT=$(find $ARG -name pkgconfig -type d -print0 | xargs -0 printf '%s:')
+    IFS=':'
+    for e in $PKG_CONFIG_PATHS; do
+        eval e=$e # expand ~ in path
+        EXTRA+="$(realpath $e):"
+    done
+    IFS=
+    for p in $FIND_RESULT $EXTRA; do
+        RESULT+="${p}"
+    done
+    echo $RESULT | sed 's/:$//'
+}
+
+function toolchain_file() {
+    case ${1} in
+        linux-armv7)
+            echo "${SWIFT_SOURCE_DIR}/cmake/modules/Toolchain-linux-arm.cmake"
+            ;;
+        *)
+            echo "unknown cross target"
+            exit 1
+            ;;
+    esac
+}
+
 #
 # Configure and build each product
 #
@@ -1557,6 +1587,10 @@ for host in "${ALL_HOSTS[@]}"; do
         build_targets=(all)
 
         if [[ $(is_cross_tools_host ${host}) ]] ; then
+                
+            # Allows find_package to find packages in the sysroot
+            PKG_CONFIG_PATH=$(get_pkg_config_path ${CROSS_COMPILE_SYSROOT})
+            export PKG_CONFIG_PATH
 
             # Cross-compiled hosts are always compiled after the LOCAL_HOST,
             # and are built with the freshly-baked tools we just made.
@@ -1564,6 +1598,9 @@ for host in "${ALL_HOSTS[@]}"; do
                 "${COMMON_CMAKE_OPTIONS[@]}"
                 -DCMAKE_C_COMPILER="$(build_directory ${LOCAL_HOST} llvm)/bin/clang"
                 -DCMAKE_CXX_COMPILER="$(build_directory ${LOCAL_HOST} llvm)/bin/clang++"
+                -DCMAKE_TOOLCHAIN_FILE=$(toolchain_file ${host})
+                -DCMAKE_SYSROOT:PATH="${CROSS_COMPILE_SYSROOT}"
+                -DCMAKE_C_COMPILER_EXTERNAL_TOOLCHAIN:PATH="${CROSS_COMPILE_TOOLCHAIN_BIN}"
             )
 
             # CMake can't relink when using Ninja, but that's okay -
@@ -1645,6 +1682,7 @@ for host in "${ALL_HOSTS[@]}"; do
                         -DLLVM_NATIVE_BUILD=$(build_directory "${LOCAL_HOST}" llvm)
                     )
                 fi
+
                 ;;
 
             swift)
@@ -2303,12 +2341,12 @@ for host in "${ALL_HOSTS[@]}"; do
             { set +x; } 2>/dev/null
         fi
 
-        # We can only run tests built for the host machine, because
-        # cross-compiled hosts only build their native target. See: get_stdlib_targets_for_host()
-        if [[$(is_cross_tools_host ${host})]]; then
-            echo "--- Can't execute tests for ${host}, skipping... ---"
-            continue
-        fi
+         # We can only run tests built for the host machine, because
+         # cross-compiled hosts only build their native target. See: get_stdlib_targets_for_host()
+         if [[$(is_cross_tools_host ${host})]]; then
+             echo "--- Can't execute tests for ${host}, skipping... ---"
+             continue
+         fi
 
         echo "--- Running tests for ${product} ---"
         for target in "${results_targets[@]}"; do
@@ -2341,10 +2379,18 @@ done
 
 for host in "${ALL_HOSTS[@]}"; do
 
+    if [ "${host}" == "${LOCAL_HOST}" ] && [[ -n "${SKIP_INSTALL_HOST}" ]]; then
+        continue
+    fi
+
     set_build_options_for_host $host
 
-    # FIXME: All hosts install to the same INSTALL_DESTDIR and INSTALL_SYMROOT. 
-    # We need to implement host-specific install locations in order to support cross-compiling.
+    # Install to a deployment-target-specific subfolder in the INSTALL_DESTDIR
+    if [[ "${host}" == "macosx-"* ]]; then
+        TARGET_INSTALL_DESTDIR="${INSTALL_DESTDIR}/${host}/${TOOLCHAIN_PREFIX}"
+    else
+        TARGET_INSTALL_DESTDIR="${INSTALL_DESTDIR}/${host}"
+    fi
 
     for product in "${PRODUCTS[@]}"; do
 
@@ -2381,7 +2427,7 @@ for host in "${ALL_HOSTS[@]}"; do
                     macosx-*)
                         set_lldb_build_mode
                         pushd ${LLDB_SOURCE_DIR}
-                        xcodebuild -target toolchain -configuration ${LLDB_BUILD_MODE} install ${lldb_xcodebuild_options[@]} DSTROOT="${INSTALL_DESTDIR}" LLDB_TOOLCHAIN_PREFIX="${TOOLCHAIN_PREFIX}"
+                        xcodebuild -target toolchain -configuration ${LLDB_BUILD_MODE} install ${lldb_xcodebuild_options[@]} DSTROOT="${INSTALL_DESTDIR}/${host}" LLDB_TOOLCHAIN_PREFIX="${TOOLCHAIN_PREFIX}"
                         popd
                         continue
                         ;;
@@ -2404,7 +2450,7 @@ for host in "${ALL_HOSTS[@]}"; do
 
                 echo "--- Installing ${product} ---"
                 set -x
-                "${swiftpm_bootstrap_command[@]}" --prefix="${INSTALL_DESTDIR}"/"${INSTALL_PREFIX}" install
+                "${swiftpm_bootstrap_command[@]}" --prefix="${TARGET_INSTALL_DESTDIR}"/"${INSTALL_PREFIX}" install
                 { set +x; } 2>/dev/null
                 # As swiftpm bootstraps the installation itself, we break early here.
                 continue
@@ -2435,7 +2481,7 @@ for host in "${ALL_HOSTS[@]}"; do
 
                 echo "--- Installing ${product} ---"
                 XCTEST_BUILD_DIR=$(build_directory ${host} xctest)
-                XCTEST_INSTALL_PREFIX="${INSTALL_DESTDIR}/${INSTALL_PREFIX}/lib/swift/${LIB_TARGET}"
+                XCTEST_INSTALL_PREFIX="${TARGET_INSTALL_DESTDIR}/${INSTALL_PREFIX}/lib/swift/${LIB_TARGET}"
                 # Note that installing directly to /usr/lib/swift usually
                 # requires root permissions.
                 set -x
@@ -2494,55 +2540,59 @@ for host in "${ALL_HOSTS[@]}"; do
 
         set -x
 
-        DESTDIR="${INSTALL_DESTDIR}" "${CMAKE}" --build "${build_dir}" -- ${INSTALL_TARGETS}
+        DESTDIR="${TARGET_INSTALL_DESTDIR}" "${CMAKE}" --build "${build_dir}" -- ${INSTALL_TARGETS}
         { set +x; } 2>/dev/null
     done
 
-    if [[ "${DARWIN_INSTALL_EXTRACT_SYMBOLS}" ]] ; then
-    set -x
-    # Copy executables and shared libraries from the INSTALL_DESTDIR to
-    # INSTALL_SYMROOT and run dsymutil on them.
-    (cd "${INSTALL_DESTDIR}" &&
-     find ./"${TOOLCHAIN_PREFIX}" -perm -0111 -type f -print | cpio -pdm "${INSTALL_SYMROOT}")
+    if [[ "${host}" == "macosx-"* ]]; then
 
-    # Run dsymutil on executables and shared libraries.
-    #
-    # Exclude shell scripts.
-    (cd "${INSTALL_SYMROOT}" &&
-     find ./"${TOOLCHAIN_PREFIX}" -perm -0111 -type f -print | \
-       grep -v swift-stdlib-tool | \
-       grep -v crashlog.py | \
-       grep -v symbolication.py | \
-       xargs -n 1 -P ${BUILD_JOBS} $(xcrun_find_tool dsymutil))
+        if [[ "${DARWIN_INSTALL_EXTRACT_SYMBOLS}" ]] ; then
+            set -x
+            # Copy executables and shared libraries from the INSTALL_DESTDIR to
+            # INSTALL_SYMROOT and run dsymutil on them.
+            (cd "${TARGET_INSTALL_DESTDIR}" &&
+             find ./"${TOOLCHAIN_PREFIX}" -perm -0111 -type f -print | cpio -pdm "${INSTALL_SYMROOT}/${host}")
 
-    # Strip executables, shared libraries and static libraries in
-    # INSTALL_DESTDIR.
-    find "${INSTALL_DESTDIR}"/"${TOOLCHAIN_PREFIX}" \
-      \( -perm -0111 -or -name "*.a" \) -type f -print | \
-      xargs -n 1 -P ${BUILD_JOBS} $(xcrun_find_tool strip) -S
+            # Run dsymutil on executables and shared libraries.
+            #
+            # Exclude shell scripts.
+            (cd "${INSTALL_SYMROOT}/${host}" &&
+             find ./"${TOOLCHAIN_PREFIX}" -perm -0111 -type f -print | \
+               grep -v swift-stdlib-tool | \
+               grep -v crashlog.py | \
+               grep -v symbolication.py | \
+               xargs -n 1 -P ${BUILD_JOBS} $(xcrun_find_tool dsymutil))
 
-    { set +x; } 2>/dev/null
-fi
+            # Strip executables, shared libraries and static libraries in
+            # INSTALL_DESTDIR.
+            find "${TARGET_INSTALL_DESTDIR}" \
+              \( -perm -0111 -or -name "*.a" \) -type f -print | \
+              xargs -n 1 -P ${BUILD_JOBS} $(xcrun_find_tool strip) -S
 
-if [[ "${INSTALLABLE_PACKAGE}" ]] ; then
-    echo "--- Creating installable package ---"
-    echo "-- Package file: ${INSTALLABLE_PACKAGE} --"
+            { set +x; } 2>/dev/null
+        fi
+    fi
+    
+    if [[ "${INSTALLABLE_PACKAGE}" ]] ; then
+        echo "--- Creating installable package ---"
+        echo "-- Package file: ${INSTALLABLE_PACKAGE}-${host}.tar --"
 
-    if [[ "${host}" == "macosx-"* ]] ; then
-      copy_swift_stdlib_tool_substitute "${INSTALL_DESTDIR}/${INSTALL_PREFIX}/bin/swift-stdlib-tool"
-      
-      # Create plist for xctoolchain.
-      echo "-- Create Info.plist --"
-      PLISTBUDDY_BIN="/usr/libexec/PlistBuddy"
+        if [[ "${host}" == "macosx-"* ]]; then
 
-      DARWIN_TOOLCHAIN_INSTALL_LOCATION="/Library/Developer/Toolchains/${DARWIN_TOOLCHAIN_NAME}.xctoolchain"
-      DARWIN_TOOLCHAIN_INFO_PLIST="${INSTALL_DESTDIR}/${TOOLCHAIN_PREFIX}/Info.plist"
-      DARWIN_TOOLCHAIN_REPORT_URL="https://bugs.swift.org/"
-      COMPATIBILITY_VERSION=1
-      DARWIN_TOOLCHAIN_CREATED_DATE="$(date -u +'%a %b %d %T GMT %Y')"
+          copy_swift_stdlib_tool_substitute "${TARGET_INSTALL_DESTDIR}/${INSTALL_PREFIX}/bin/swift-stdlib-tool"
+          
+          # Create plist for xctoolchain.
+          echo "-- Create Info.plist --"
+          PLISTBUDDY_BIN="/usr/libexec/PlistBuddy"
 
-      echo "-- Removing: ${DARWIN_TOOLCHAIN_INFO_PLIST}"
-      rm -f ${DARWIN_TOOLCHAIN_INFO_PLIST}
+          DARWIN_TOOLCHAIN_INSTALL_LOCATION="/Library/Developer/Toolchains/${DARWIN_TOOLCHAIN_NAME}.xctoolchain"
+          DARWIN_TOOLCHAIN_INFO_PLIST="${TARGET_INSTALL_DESTDIR}/Info.plist"
+          DARWIN_TOOLCHAIN_REPORT_URL="https://bugs.swift.org/"
+          COMPATIBILITY_VERSION=1
+          DARWIN_TOOLCHAIN_CREATED_DATE="$(date -u +'%a %b %d %T GMT %Y')"
+
+          echo "-- Removing: ${DARWIN_TOOLCHAIN_INFO_PLIST}"
+          rm -f ${DARWIN_TOOLCHAIN_INFO_PLIST}
 
       ${PLISTBUDDY_BIN} -c "Add DisplayName string '${DARWIN_TOOLCHAIN_DISPLAY_NAME}'" "${DARWIN_TOOLCHAIN_INFO_PLIST}"
       ${PLISTBUDDY_BIN} -c "Add ShortDisplayName string '${DARWIN_TOOLCHAIN_DISPLAY_NAME_SHORT}'" "${DARWIN_TOOLCHAIN_INFO_PLIST}"
@@ -2558,53 +2608,55 @@ if [[ "${INSTALLABLE_PACKAGE}" ]] ; then
       ${PLISTBUDDY_BIN} -c "Add OverrideBuildSettings:SWIFT_DISABLE_REQUIRED_ARCLITE string 'YES'" "${DARWIN_TOOLCHAIN_INFO_PLIST}"
       ${PLISTBUDDY_BIN} -c "Add OverrideBuildSettings:SWIFT_LINK_OBJC_RUNTIME string 'YES'" "${DARWIN_TOOLCHAIN_INFO_PLIST}"
 
-      chmod a+r "${DARWIN_TOOLCHAIN_INFO_PLIST}"
+          chmod a+r "${DARWIN_TOOLCHAIN_INFO_PLIST}"
 
-      if [[ "${DARWIN_TOOLCHAIN_APPLICATION_CERT}" ]] ; then
-        echo "-- Codesign xctoolchain --"
-        "${SWIFT_SOURCE_DIR}/utils/toolchain-codesign" "${DARWIN_TOOLCHAIN_APPLICATION_CERT}" "${INSTALL_DESTDIR}/${TOOLCHAIN_PREFIX}" 
-      fi
-      if [[ "${DARWIN_TOOLCHAIN_INSTALLER_PACKAGE}" ]] ; then
-        echo "-- Create Installer --"
-        "${SWIFT_SOURCE_DIR}/utils/toolchain-installer" "${INSTALL_DESTDIR}/${TOOLCHAIN_PREFIX}" "${DARWIN_TOOLCHAIN_BUNDLE_IDENTIFIER}" \
-        "${DARWIN_TOOLCHAIN_INSTALLER_CERT}" "${DARWIN_TOOLCHAIN_INSTALLER_PACKAGE}" "${DARWIN_TOOLCHAIN_INSTALL_LOCATION}" \
-        "${DARWIN_TOOLCHAIN_VERSION}" "${SWIFT_SOURCE_DIR}/utils/darwin-installer-scripts"
-      fi 
+          if [[ "${DARWIN_TOOLCHAIN_APPLICATION_CERT}" ]] ; then
+            echo "-- Codesign xctoolchain --"
+            "${SWIFT_SOURCE_DIR}/utils/toolchain-codesign" "${DARWIN_TOOLCHAIN_APPLICATION_CERT}" "${TARGET_INSTALL_DESTDIR}" 
+          fi
+          if [[ "${DARWIN_TOOLCHAIN_INSTALLER_PACKAGE}" ]] ; then
+            echo "-- Create Installer --"
+            "${SWIFT_SOURCE_DIR}/utils/toolchain-installer" "${TARGET_INSTALL_DESTDIR}" "${DARWIN_TOOLCHAIN_BUNDLE_IDENTIFIER}" \
+            "${DARWIN_TOOLCHAIN_INSTALLER_CERT}" "${DARWIN_TOOLCHAIN_INSTALLER_PACKAGE}" "${DARWIN_TOOLCHAIN_INSTALL_LOCATION}" \
+            "${DARWIN_TOOLCHAIN_VERSION}" "${SWIFT_SOURCE_DIR}/utils/darwin-installer-scripts"
+          fi 
 
-      (cd "${INSTALL_DESTDIR}" &&
-        tar -c -z -f "${INSTALLABLE_PACKAGE}" "${TOOLCHAIN_PREFIX/#\/}")
-    else
-        if [[ "$(uname -s)" == "Darwin" ]] ; then
-            (cd "${INSTALL_DESTDIR}" &&
-                    tar -c -z -f "${INSTALLABLE_PACKAGE}" "${INSTALL_PREFIX/#\/}")
+          (cd "${TARGET_INSTALL_DESTDIR}"/../ &&
+            tar -c -z -f "${INSTALLABLE_PACKAGE}-${host}.tar" "${TOOLCHAIN_PREFIX/#\/}")
         else
-            (cd "${INSTALL_DESTDIR}" &&
-                    tar -c -z -f "${INSTALLABLE_PACKAGE}" --owner=0 --group=0 "${INSTALL_PREFIX/#\/}")
-        fi
-    fi
-    if [[ "${TEST_INSTALLABLE_PACKAGE}" ]] ; then
-        PKG_TESTS_SOURCE_DIR="${WORKSPACE}/swift-integration-tests"
-        PKG_TESTS_SANDBOX_PARENT="$(build_directory swift_package_sandbox_${host} none)"
-
-        if [[ "${host}" == "macosx-"* ]] ; then
-            PKG_TESTS_SANDBOX="${PKG_TESTS_SANDBOX_PARENT}"/"${TOOLCHAIN_PREFIX}"
-        else # Linux
-            PKG_TESTS_SANDBOX="${PKG_TESTS_SANDBOX_PARENT}"
+            if [[ "$(uname -s)" == "Darwin" ]] ; then
+                (cd "${TARGET_INSTALL_DESTDIR}" &&
+                tar -c -z -f "${INSTALLABLE_PACKAGE}-${host}.tar" "${INSTALL_PREFIX/#\/}")
+            else
+                (cd "${TARGET_INSTALL_DESTDIR}" &&
+                tar -c -z -f "${INSTALLABLE_PACKAGE}-${host}.tar" --owner=0 --group=0 "${INSTALL_PREFIX/#\/}")
+            fi
         fi
 
-        LIT_EXECUTABLE_PATH="${LLVM_SOURCE_DIR}/utils/lit/lit.py"
-        FILECHECK_EXECUTABLE_PATH="$(build_directory_bin ${LOCAL_HOST} llvm)/FileCheck"
-        echo "-- Test Installable Package --"
-        set -x
-        rm -rf "${PKG_TESTS_SANDBOX_PARENT}"
-        mkdir -p "${PKG_TESTS_SANDBOX}"
-        pushd "${PKG_TESTS_SANDBOX_PARENT}"
-        tar xzf "${INSTALLABLE_PACKAGE}"
-        popd
+        if [[ "${TEST_INSTALLABLE_PACKAGE}" ]] ; then
+            PKG_TESTS_SOURCE_DIR="${WORKSPACE}/swift-integration-tests"
+            PKG_TESTS_SANDBOX_PARENT="$(build_directory swift_package_sandbox_${host} none)"
 
-        (cd "${PKG_TESTS_SOURCE_DIR}" &&
-                python "${LIT_EXECUTABLE_PATH}" . -sv --param package-path="${PKG_TESTS_SANDBOX}" --param filecheck="${FILECHECK_EXECUTABLE_PATH}")
-        { set +x; } 2>/dev/null
+            if [[ "$(uname -s)" == "Darwin" ]] ; then
+                PKG_TESTS_SANDBOX="${PKG_TESTS_SANDBOX_PARENT}"/"${TOOLCHAIN_PREFIX}"
+            else # Linux
+                PKG_TESTS_SANDBOX="${PKG_TESTS_SANDBOX_PARENT}"
+            fi
+
+            LIT_EXECUTABLE_PATH="${LLVM_SOURCE_DIR}/utils/lit/lit.py"
+            FILECHECK_EXECUTABLE_PATH="$(build_directory_bin ${LOCAL_HOST} llvm)/FileCheck"
+            echo "-- Test Installable Package --"
+            set -x
+            rm -rf "${PKG_TESTS_SANDBOX_PARENT}"
+            mkdir -p "${PKG_TESTS_SANDBOX}"
+            pushd "${PKG_TESTS_SANDBOX_PARENT}"
+            tar xzf "${INSTALLABLE_PACKAGE}"
+            popd
+
+            (cd "${PKG_TESTS_SOURCE_DIR}" &&
+                    python "${LIT_EXECUTABLE_PATH}" . -sv --param package-path="${PKG_TESTS_SANDBOX}" --param filecheck="${FILECHECK_EXECUTABLE_PATH}")
+            { set +x; } 2>/dev/null
+        fi
     fi
-fi
 done
+

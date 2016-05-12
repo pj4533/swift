@@ -182,6 +182,10 @@ function(_add_variant_swift_compile_flags
       "-sdk" "${SWIFT_SDK_${sdk}_PATH}"
       "-target" "${SWIFT_SDK_${sdk}_ARCH_${arch}_TRIPLE}")
 
+  if(CMAKE_CROSSCOMPILING)
+    list(APPEND result "-resource-dir" "${SWIFTLIB_DIR}")
+  endif()
+
   if("${CMAKE_SYSTEM_NAME}" STREQUAL "Darwin")
     list(APPEND result
         "-F" "${SWIFT_SDK_${sdk}_PATH}/../../../Developer/Library/Frameworks")

@@ -114,7 +114,7 @@ macro(configure_sdk_unix
   # variables.
 
   set(SWIFT_SDK_${prefix}_NAME "${name}")
-  set(SWIFT_SDK_${prefix}_PATH "/")
+  set(SWIFT_SDK_${prefix}_PATH "${CMAKE_SYSROOT}")
   set(SWIFT_SDK_${prefix}_VERSION "don't use")
   set(SWIFT_SDK_${prefix}_BUILD_NUMBER "don't use")
   set(SWIFT_SDK_${prefix}_DEPLOYMENT_VERSION "don't use")
