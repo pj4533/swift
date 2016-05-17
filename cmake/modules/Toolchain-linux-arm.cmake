@@ -4,17 +4,22 @@ if("${CMAKE_C_COMPILER_EXTERNAL_TOOLCHAIN}" STREQUAL "")
 	message(FATAL_ERROR "You must specify a path to the cross-linker")
 endif()
 
+# TOOLCHAINFILE_TRIPLE Must match llvm_host_triple (build-script-impl), and also SWIFT_HOST_VARIANT_ARCH
+# swift needs that to find the standard library.
+if("${CMAKE_CROSSTOOLS_HOST}" STREQUAL "linux-armv6")
+	set(CMAKE_SYSTEM_PROCESSOR "armv6l")
+	set(TOOLCHAINFILE_TRIPLE "armv6-linux-gnueabihf")
+else()
+	set(CMAKE_SYSTEM_PROCESSOR "armv7l")
+	set(TOOLCHAINFILE_TRIPLE "armv7-linux-gnueabihf")
+endif()
+
 set(CMAKE_SYSTEM_NAME Linux)
-set(CMAKE_SYSTEM_PROCESSOR "armv7l")
 set(CMAKE_EXECUTABLE_FORMAT "ELF")
 
 # This is only 'arm' because it's GCC's triple.
 # Used for finding system headers in Glibc/CMakeLists.txt
 set(CMAKE_LIBRARY_ARCHITECTURE "arm-linux-gnueabihf")
-
-# Must match llvm_host_triple (build-script-impl), and also SWIFT_HOST_VARIANT_ARCH
-# swift needs that to find the standard library.
-set(TOOLCHAINFILE_TRIPLE "armv7-linux-gnueabihf")
 
 include(CMakeForceCompiler)
 

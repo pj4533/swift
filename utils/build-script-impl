@@ -348,11 +348,11 @@ function set_build_options_for_host() {
                 # ARM targets require the gold linker
                 USE_GOLD_LINKER=1
                 SWIFT_HOST_VARIANT_ARCH="armv6"
+                llvm_host_triple="${SWIFT_HOST_VARIANT_ARCH}-linux-gnueabihf"
+                llvm_target_arch="ARM"
                 ;;
             linux-armv7)
                 SWIFT_HOST_VARIANT_ARCH="armv7"
-                llvm_host_triple="${SWIFT_HOST_VARIANT_ARCH}-linux-gnueabihf"
-                llvm_target_arch="ARM"
 
                 # ARM targets require the gold linker
                 USE_GOLD_LINKER=1
@@ -1012,7 +1012,7 @@ for t in ${CROSS_COMPILE_HOSTS} ; do
         iphonesimulator-i386 | iphonesimulator-x86_64 | \
         iphoneos-arm64 | iphoneos-armv7 | iphoneos-armv7s | \
         appletvos-arm64 | appletvsimulator-x86_64 | \
-        watchos-armv7k | watchsimulator-i386 | linux-armv7 )
+        watchos-armv7k | watchsimulator-i386 | linux-armv7 | linux-armv6 )
             ;;
         *)
             echo "Unknown deployment target: ${t}"
@@ -1463,7 +1463,7 @@ function get_pkg_config_path() {
 
 function toolchain_file() {
     case ${1} in
-        linux-armv7)
+        linux-armv*)
             echo "${SWIFT_SOURCE_DIR}/cmake/modules/Toolchain-linux-arm.cmake"
             ;;
         *)
@@ -1599,6 +1599,7 @@ for host in "${ALL_HOSTS[@]}"; do
                 -DCMAKE_C_COMPILER="$(build_directory ${LOCAL_HOST} llvm)/bin/clang"
                 -DCMAKE_CXX_COMPILER="$(build_directory ${LOCAL_HOST} llvm)/bin/clang++"
                 -DCMAKE_TOOLCHAIN_FILE=$(toolchain_file ${host})
+                -DCMAKE_CROSSTOOLS_HOST="${host}"
                 -DCMAKE_SYSROOT:PATH="${CROSS_COMPILE_SYSROOT}"
                 -DCMAKE_C_COMPILER_EXTERNAL_TOOLCHAIN:PATH="${CROSS_COMPILE_TOOLCHAIN_BIN}"
             )
