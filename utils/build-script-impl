@@ -353,6 +353,8 @@ function set_build_options_for_host() {
                 ;;
             linux-armv7)
                 SWIFT_HOST_VARIANT_ARCH="armv7"
+                llvm_host_triple="${SWIFT_HOST_VARIANT_ARCH}-linux-gnueabihf"
+                llvm_target_arch="ARM"
 
                 # ARM targets require the gold linker
                 USE_GOLD_LINKER=1
